@@ -30,7 +30,7 @@ Two pipelines share identical transform, validate, and output code — only the
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                   VALIDATE (Pandera — 14 checks, blocking)              │
+│                   VALIDATE (Pandera — 15 checks, blocking)              │
 │                                                                         │
 │  check_objects_transform:                                                │
 │    nested struct field checks via list.eval(element().struct.field(...)) │
@@ -116,7 +116,7 @@ Uses `.lazy()` throughout with a single `.collect(engine="streaming")` at the en
 
 ### check_objects_transform
 
-Pandera validation on the transform output — 14 checks across 5 categories, all
+Pandera validation on the transform output — 15 checks across 5 categories, all
 operating on nested struct fields **without flattening**.
 
 **Basic list checks:**
@@ -207,27 +207,39 @@ Pass-through nested data stays nested throughout the entire pipeline.
 
 ### Pandera validation of nested data
 
-Custom Pandera checks can reach into struct fields without exploding:
+All nested checks use `@pa.dataframe_check` with `PolarsData` — Pandera's Polars
+backend passes a `PolarsData` namedtuple (not `pl.Series` or `pl.DataFrame`).
+Checks return a `pl.LazyFrame` with a single boolean column:
 
 ```python
-@pa.check("dimensions", name="all_values_gt_1")
+from pandera.polars import PolarsData
+
+@pa.dataframe_check(name="all_dimension_values_gt_1")
 @classmethod
-def dimension_values_positive(cls, col: pl.Series) -> pl.Series:
-    return col.list.eval(pl.element().struct.field("value")).list.min() > 1
+def dimension_values_positive(cls, data: PolarsData) -> pl.LazyFrame:
+    return data.lazyframe.select(
+        pl.col("dimensions")
+        .list.eval(pl.element().struct.field("value"))
+        .list.min()
+        .gt(1)
+    )
 ```
 
-Cross-column checks use `@pa.dataframe_check` with the vacuously-true pattern
-(`~condition | check_result`) for checks on optional nested lists:
+Cross-column checks use the vacuously-true pattern (`~condition | check_result`)
+for checks on optional nested lists:
 
 ```python
 @pa.dataframe_check(name="sculpture_must_have_depth")
 @classmethod
-def sculpture_has_depth(cls, df: pl.DataFrame) -> pl.Series:
-    is_sculpture = df["department"] == "Sculpture"
-    has_depth = df["dimensions"].list.eval(
-        pl.element().struct.field("type") == "depth"
-    ).list.any()
-    return ~is_sculpture | has_depth
+def sculpture_has_depth(cls, data: PolarsData) -> pl.LazyFrame:
+    lf = data.lazyframe
+    is_sculpture = pl.col("department") == "Sculpture"
+    has_depth = (
+        pl.col("dimensions")
+        .list.eval(pl.element().struct.field("type") == "depth")
+        .list.any()
+    )
+    return lf.select(~is_sculpture | has_depth)
 ```
 
 ### Source-format independence
@@ -242,6 +254,59 @@ know or care whether the source was XML or JSON.
 
 Term ID resolution happens via Polars `.join()`, not Python dict lookups.
 This handles nulls, duplicates, and many-to-many relationships correctly.
+
+## Pandera Limitations with Nested Data
+
+Pandera (v0.29) supports nested `List(Struct(...))` validation but has significant
+limitations. These findings are from empirical testing — see `scripts/test_pandera_nested.py`.
+
+### What works
+
+| Capability | Details |
+|---|---|
+| Inner type declarations | `pl.List = pa.Field(dtype_kwargs={"inner": pl.Struct({...})})` validates the full Polars dtype signature |
+| Coercion inside nested types | `coerce=True` converts e.g. `List(Int64)` to `List(Float64)`, even inside structs |
+| Custom checks via `list.eval()` | Struct field values, string patterns, null checks, list lengths all work |
+| Cross-column checks | `@pa.dataframe_check` can combine nested and flat columns |
+| `nullable=False` on List columns | Catches null list values correctly |
+
+### What doesn't work
+
+| Limitation | Details |
+|---|---|
+| `pa.Field()` constraints on List columns | `ge=`, `le=`, `isin=`, `unique=`, `str_length=` are scalar-only — they crash or produce wrong results on List columns |
+| `@pa.check` on `List(Struct)` with `lazy=True` | Pandera crashes building `failure_cases` because Polars cannot cast `List(Struct)` to String. Use `@pa.dataframe_check` instead |
+| Element-level error reporting | Pandera never reports *which* nested element within a list failed — only the aggregated row-level result (e.g., "min was <= 1") |
+| Nested `DataFrameModel` for struct fields | Cannot nest one schema inside another for struct validation — inner checks require custom `@pa.dataframe_check` methods |
+| `strict=True` recursing into structs | Only enforces strict on top-level columns, not struct fields (though dtype mismatches are caught indirectly) |
+
+### Critical: `PolarsData` not `pl.Series`
+
+In Pandera's Polars backend, `@pa.check` and `@pa.dataframe_check` methods receive a
+`PolarsData` namedtuple (with `.lazyframe` and `.key` attributes), **not** `pl.Series`
+or `pl.DataFrame`. Using the wrong type hint silently breaks all checks — Pandera catches
+the resulting `AttributeError` and reports it as a validation failure on every row.
+
+```python
+# BROKEN — crashes with AttributeError, reported as false validation failure
+@pa.check("dimensions", name="check")
+@classmethod
+def check_values(cls, col: pl.Series) -> pl.Series:
+    return col.list.eval(...)  # AttributeError: 'PolarsData' has no attribute 'list'
+
+# CORRECT — use PolarsData and return LazyFrame
+@pa.dataframe_check(name="check")
+@classmethod
+def check_values(cls, data: PolarsData) -> pl.LazyFrame:
+    return data.lazyframe.select(pl.col("dimensions").list.eval(...))
+```
+
+### Workaround summary
+
+All nested checks in this project use `@pa.dataframe_check` with `PolarsData` to avoid
+both the signature bug and the `failure_cases` crash. The tradeoff: errors are reported
+at the schema level (not column level), but check names encode which column is being
+validated.
 
 ## Data Quality Issues (Planted)
 
