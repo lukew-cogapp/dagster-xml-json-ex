@@ -154,6 +154,52 @@ Writes the enriched DataFrame as nested JSON, ready for Elasticsearch bulk index
 Polars `List(Struct(...))` columns survive Parquet round-trips with full type fidelity.
 No JSON serialisation needed — the nested schema is stored in Parquet's native format.
 
+Here's a single enriched record from `output/xml/transform/objects_enriched.parquet` (OBJ-001):
+
+```
+Schema:
+  object_id:       String
+  title:           String
+  date_made:       Int64
+  credit_line:     String
+  department:      String
+  dimensions:      List(Struct({'type': String, 'value': Float64, 'unit': String}))
+  media:           List(Struct({'type': String, 'url': String, 'caption': String}))
+  classifications: List(Struct({'type_label': String, 'term_label': String}))
+  constituents:    List(Struct({'name': String, 'role': String, 'birth_year': Int64, 'nationality': String}))
+```
+
+```json
+{
+  "object_id": "OBJ-001",
+  "title": "The Harbor at Sunset",
+  "date_made": 1892,
+  "credit_line": "Gift of the Thornton Family, 2003",
+  "department": "European Paintings",
+  "dimensions": [
+    {"type": "height", "value": 98.5, "unit": "cm"},
+    {"type": "width", "value": 134.2, "unit": "cm"}
+  ],
+  "media": [
+    {"type": "primary", "url": "https://cdn.example.org/img/OBJ-001_full.jpg", "caption": "Overall view, raking light"},
+    {"type": "detail", "url": "https://cdn.example.org/img/OBJ-001_det1.jpg", "caption": "Detail of harbor boats"}
+  ],
+  "classifications": [
+    {"type_label": "Painting", "term_label": "Oil on canvas"},
+    {"type_label": "Landscape", "term_label": "Landscape"},
+    {"type_label": "Landscape", "term_label": "Seascape"},
+    {"type_label": "Landscape", "term_label": "Harbor"}
+  ],
+  "constituents": [
+    {"name": "Marie Duval", "role": "artist", "birth_year": 1856, "nationality": "French"},
+    {"name": "Atelier Leblanc", "role": "frame_maker", "birth_year": null, "nationality": null}
+  ]
+}
+```
+
+Flat fields (`object_id`, `title`, `date_made`, etc.) sit alongside nested
+`List(Struct)` columns — all stored natively in Parquet, no serialisation needed.
+
 ### Selective flattening
 
 Only columns that need enrichment (joins with terminology) are exploded.
