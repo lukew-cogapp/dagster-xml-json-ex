@@ -43,6 +43,8 @@ to **nested JSON for Elasticsearch**.
 
 ## Quick Start
 
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
 ```bash
 uv sync
 uv run python pipeline.py
